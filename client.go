@@ -202,7 +202,7 @@ func (c *Client) IsReady() bool {
 // Now checks WebSocket connection state, not ready state
 func (c *Client) SendMessage(message interface{}) error {
 	if !c.IsConnected() || c.conn == nil {
-		return fmt.Errorf("WebSocket connection is not available!!!!")
+		return fmt.Errorf("WebSocket connection is not available!")
 	}
 
 	c.writeMu.Lock()
