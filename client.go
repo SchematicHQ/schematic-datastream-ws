@@ -2,6 +2,7 @@ package schematicdatastreamws
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,28 +29,25 @@ const (
 
 // Logger interface for logging WebSocket events
 type Logger interface {
-	Debug(ctx context.Context, msg string)
-	Info(ctx context.Context, msg string)
-	Warn(ctx context.Context, msg string)
-	Error(ctx context.Context, msg string)
+	Debug(context.Context, string, ...any)
+	Info(context.Context, string, ...any)
+	Warn(context.Context, string, ...any)
+	Error(context.Context, string, ...any)
 }
 
-// MessageHandler interface for handling incoming WebSocket messages
-type MessageHandler interface {
-	HandleMessage(ctx context.Context, messageType int, data []byte) error
-}
+// MessageHandlerFunc is a function type for handling incoming WebSocket messages
+// Now expects parsed DataStreamResp instead of raw bytes
+type MessageHandlerFunc func(ctx context.Context, message *DataStreamResp) error
 
-// ConnectionReadyHandler interface for functions that need to be called before connection is considered ready
-type ConnectionReadyHandler interface {
-	OnConnectionReady(ctx context.Context) error
-}
+// ConnectionReadyHandlerFunc is a function type for functions that need to be called before connection is considered ready
+type ConnectionReadyHandlerFunc func(ctx context.Context) error
 
 // ClientOptions contains configuration for the WebSocket client
 type ClientOptions struct {
-	URL                    string
+	URL                    string // HTTP API URL or WebSocket URL - HTTP URLs will be automatically converted to WebSocket URLs
 	Headers                http.Header
-	MessageHandler         MessageHandler
-	ConnectionReadyHandler ConnectionReadyHandler
+	MessageHandler         MessageHandlerFunc
+	ConnectionReadyHandler ConnectionReadyHandlerFunc
 	Logger                 Logger
 	MaxReconnectAttempts   int
 	MinReconnectDelay      time.Duration
@@ -61,16 +60,18 @@ type Client struct {
 	url                    *url.URL
 	headers                http.Header
 	logger                 Logger
-	messageHandler         MessageHandler
-	connectionReadyHandler ConnectionReadyHandler
+	messageHandler         MessageHandlerFunc
+	connectionReadyHandler ConnectionReadyHandlerFunc
 	maxReconnectAttempts   int
 	minReconnectDelay      time.Duration
 	maxReconnectDelay      time.Duration
 
 	// Connection state
 	conn        *websocket.Conn
-	connected   bool
+	connected   bool // WebSocket connection state
+	ready       bool // Datastream client ready state
 	connectedMu sync.RWMutex
+	readyMu     sync.RWMutex
 	writeMu     sync.Mutex
 
 	// Control channels
@@ -83,6 +84,44 @@ type Client struct {
 	cancel context.CancelFunc
 }
 
+// convertAPIURLToWebSocketURL converts an API URL to a WebSocket datastream URL
+// Examples:
+//
+//	https://api.schematichq.com -> wss://datastream.schematichq.com/datastream
+//	https://api.staging.example.com -> wss://datastream.staging.example.com/datastream
+//	https://custom.example.com -> wss://custom.example.com/datastream
+//	http://localhost:8080 -> ws://localhost:8080/datastream
+func convertAPIURLToWebSocketURL(apiURL string) (*url.URL, error) {
+	parsedURL, err := url.Parse(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API URL: %w", err)
+	}
+
+	// Convert HTTP schemes to WebSocket schemes
+	switch parsedURL.Scheme {
+	case "https":
+		parsedURL.Scheme = "wss"
+	case "http":
+		parsedURL.Scheme = "ws"
+	default:
+		return nil, fmt.Errorf("unsupported scheme: %s (must be http or https)", parsedURL.Scheme)
+	}
+
+	// Replace 'api' subdomain with 'datastream' if present
+	if parsedURL.Host != "" {
+		hostParts := strings.Split(parsedURL.Host, ".")
+		if len(hostParts) > 1 && hostParts[0] == "api" {
+			hostParts[0] = "datastream"
+			parsedURL.Host = strings.Join(hostParts, ".")
+		}
+	}
+
+	// Add datastream path
+	parsedURL.Path = "/datastream"
+
+	return parsedURL, nil
+}
+
 // NewClient creates a new WebSocket client with the given options
 func NewClient(options ClientOptions) (*Client, error) {
 	if options.URL == "" {
@@ -93,9 +132,21 @@ func NewClient(options ClientOptions) (*Client, error) {
 		return nil, fmt.Errorf("MessageHandler is required")
 	}
 
-	parsedURL, err := url.Parse(options.URL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
+	var parsedURL *url.URL
+	var err error
+
+	// Auto-detect if this is an HTTP/HTTPS URL that needs conversion to WebSocket
+	if strings.HasPrefix(options.URL, "http://") || strings.HasPrefix(options.URL, "https://") {
+		parsedURL, err = convertAPIURLToWebSocketURL(options.URL)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert API URL: %w", err)
+		}
+	} else {
+		// Assume it's already a WebSocket URL
+		parsedURL, err = url.Parse(options.URL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid URL: %w", err)
+		}
 	}
 
 	// Set defaults
@@ -140,10 +191,18 @@ func (c *Client) IsConnected() bool {
 	return c.connected
 }
 
+// IsReady returns whether the datastream client is ready (connected + initialized)
+func (c *Client) IsReady() bool {
+	c.readyMu.RLock()
+	defer c.readyMu.RUnlock()
+	return c.ready && c.IsConnected()
+}
+
 // SendMessage sends a message through the WebSocket connection
+// Now checks WebSocket connection state, not ready state
 func (c *Client) SendMessage(message interface{}) error {
 	if !c.IsConnected() || c.conn == nil {
-		return fmt.Errorf("WebSocket connection is not available")
+		return fmt.Errorf("WebSocket connection is not available!!!!")
 	}
 
 	c.writeMu.Lock()
@@ -169,7 +228,8 @@ func (c *Client) Close() {
 	default:
 	}
 
-	// Close connection
+	// Close connection and reset states
+	c.setReady(false)
 	c.setConnected(false)
 	if c.conn != nil {
 		c.conn.Close()
@@ -228,28 +288,39 @@ func (c *Client) connectAndRead() {
 		c.setConnected(true)
 
 		// Set up pong handler
+		c.log("debug", "Setting up WebSocket pong handler")
 		c.conn.SetPongHandler(c.handlePong)
 
 		// Set initial read deadline
+		c.log("debug", fmt.Sprintf("Setting initial read deadline to %v", time.Now().Add(pongWait)))
 		if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
 			c.log("error", fmt.Sprintf("Failed to set read deadline: %v", err))
 		}
 
 		// Start message reading first so connection is ready to receive responses
+		c.log("debug", "Starting message reading goroutine")
 		go c.readMessages()
 
 		// Call connection ready handler if provided
 		if c.connectionReadyHandler != nil {
-			if err := c.connectionReadyHandler.OnConnectionReady(c.ctx); err != nil {
+			c.log("debug", "Calling connection ready handler")
+			if err := c.connectionReadyHandler(c.ctx); err != nil {
 				c.log("error", fmt.Sprintf("Connection ready handler failed: %v", err))
 				c.setConnected(false)
 				c.conn.Close()
 				continue
 			}
+			c.log("debug", "Connection ready handler completed successfully")
 		}
 
+		// Mark as ready only after successful initialization
+		c.setReady(true)
+		c.log("info", "Datastream client is ready")
+
 		// Handle the connection lifecycle
+		c.log("debug", "Starting connection lifecycle management")
 		if closed := c.handleConnection(); closed {
+			c.log("debug", "Connection closed normally")
 			c.setConnected(false)
 			return
 		}
@@ -260,8 +331,24 @@ func (c *Client) connectAndRead() {
 
 // connect establishes the WebSocket connection
 func (c *Client) connect() (*websocket.Conn, error) {
+	c.log("debug", fmt.Sprintf("connect: attempting to dial WebSocket URL: %s", c.url.String()))
+
 	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.Dial(c.url.String(), c.headers)
+	conn, resp, err := dialer.Dial(c.url.String(), c.headers)
+
+	if err != nil {
+		c.log("error", fmt.Sprintf("connect: failed to dial WebSocket: %v", err))
+		if resp != nil {
+			c.log("debug", fmt.Sprintf("connect: HTTP response status: %s", resp.Status))
+		}
+		return conn, err
+	}
+
+	c.log("info", fmt.Sprintf("connect: successfully established WebSocket connection to %s", c.url.String()))
+	if resp != nil {
+		c.log("debug", fmt.Sprintf("connect: HTTP response status: %s", resp.Status))
+	}
+
 	return conn, err
 }
 
@@ -301,42 +388,67 @@ func (c *Client) readMessages() {
 	for {
 		select {
 		case <-c.ctx.Done():
+			c.log("debug", "readMessages: context done, stopping message reading")
 			return
 		default:
 		}
 
-		messageType, data, err := c.conn.ReadMessage()
+		c.log("debug", "readMessages: waiting for WebSocket message...")
+		_, data, err := c.conn.ReadMessage()
 		if err != nil {
+			c.log("error", fmt.Sprintf("readMessages: failed to read WebSocket message: %v", err))
 			c.handleReadError(err)
 			return
 		}
 
-		// Handle the message using the provided handler
-		if err := c.messageHandler.HandleMessage(c.ctx, messageType, data); err != nil {
+		// Parse the datastream message
+		var message DataStreamResp
+		if err := json.Unmarshal(data, &message); err != nil {
+			c.log("error", fmt.Sprintf("readMessages: failed to parse datastream message: %v, raw data: %s", err, string(data)))
+			c.errors <- fmt.Errorf("failed to parse datastream message: %w", err)
+			continue
+		}
+
+		c.log("debug", fmt.Sprintf("readMessages: parsed message - EntityType: %s, MessageType: %s, EntityID: %v, DataLength: %d",
+			message.EntityType, message.MessageType, message.EntityID, len(message.Data)))
+
+		// Handle the parsed message using the provided handler
+		c.log("debug", "readMessages: calling message handler...")
+		if err := c.messageHandler(c.ctx, &message); err != nil {
+			c.log("error", fmt.Sprintf("readMessages: message handler error: %v", err))
 			c.errors <- fmt.Errorf("message handler error: %w", err)
+		} else {
+			c.log("debug", "readMessages: message handler completed successfully")
 		}
 	}
 }
 
 // handleReadError processes errors from reading WebSocket messages
 func (c *Client) handleReadError(err error) {
+	c.log("debug", fmt.Sprintf("handleReadError: processing read error: %v", err))
+
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
+		c.log("debug", fmt.Sprintf("handleReadError: network operation error detected: %v", opErr))
 		c.setConnected(false)
 		return
 	}
 
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		c.log("debug", fmt.Sprintf("handleReadError: normal WebSocket close detected: %v", err))
 		c.setConnected(false)
 		return
 	}
 
 	if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-		c.log("debug", fmt.Sprintf("Unexpected close error: %v", err))
+		c.log("debug", fmt.Sprintf("handleReadError: unexpected WebSocket close error: %v", err))
 		c.setConnected(false)
+		c.log("debug", "handleReadError: triggering reconnect attempt")
 		select {
 		case c.reconnect <- true:
+			c.log("debug", "handleReadError: reconnect signal sent")
 		default:
+			c.log("debug", "handleReadError: reconnect channel full, skipping signal")
 		}
 		return
 	}
@@ -383,6 +495,20 @@ func (c *Client) setConnected(connected bool) {
 	c.connectedMu.Lock()
 	defer c.connectedMu.Unlock()
 	c.connected = connected
+
+	// If disconnected, also set ready to false (avoid circular calls)
+	if !connected {
+		c.readyMu.Lock()
+		c.ready = false
+		c.readyMu.Unlock()
+	}
+}
+
+// setReady updates the ready state thread-safely
+func (c *Client) setReady(ready bool) {
+	c.readyMu.Lock()
+	defer c.readyMu.Unlock()
+	c.ready = ready
 }
 
 // log helper function that safely logs messages
