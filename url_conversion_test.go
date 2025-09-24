@@ -98,6 +98,7 @@ func TestNewClientWithAPIURL(t *testing.T) {
 			name: "HTTP API URL conversion",
 			options: ClientOptions{
 				URL:            "https://api.schematichq.com",
+				ApiKey:         "test-api-key",
 				MessageHandler: testHandler,
 			},
 			expectURL: "wss://datastream.schematichq.com/datastream",
@@ -107,6 +108,7 @@ func TestNewClientWithAPIURL(t *testing.T) {
 			name: "WebSocket URL usage",
 			options: ClientOptions{
 				URL:            "wss://custom.example.com/ws",
+				ApiKey:         "test-api-key",
 				MessageHandler: testHandler,
 			},
 			expectURL: "wss://custom.example.com/ws",
@@ -116,6 +118,7 @@ func TestNewClientWithAPIURL(t *testing.T) {
 			name: "HTTP URL conversion",
 			options: ClientOptions{
 				URL:            "http://api.localhost:8080",
+				ApiKey:         "test-api-key",
 				MessageHandler: testHandler,
 			},
 			expectURL: "ws://datastream.localhost:8080/datastream",
@@ -124,6 +127,15 @@ func TestNewClientWithAPIURL(t *testing.T) {
 		{
 			name: "No URL",
 			options: ClientOptions{
+				ApiKey:         "test-api-key",
+				MessageHandler: testHandler,
+			},
+			wantErr: true,
+		},
+		{
+			name: "No ApiKey",
+			options: ClientOptions{
+				URL:            "https://api.example.com",
 				MessageHandler: testHandler,
 			},
 			wantErr: true,
@@ -131,7 +143,8 @@ func TestNewClientWithAPIURL(t *testing.T) {
 		{
 			name: "No MessageHandler",
 			options: ClientOptions{
-				URL: "https://api.example.com",
+				URL:    "https://api.example.com",
+				ApiKey: "test-api-key",
 			},
 			wantErr: true,
 		},
@@ -155,6 +168,15 @@ func TestNewClientWithAPIURL(t *testing.T) {
 
 			if client.url.String() != tc.expectURL {
 				t.Errorf("Expected URL %q, got %q", tc.expectURL, client.url.String())
+			}
+
+			// Verify API key is properly set in headers
+			if tc.options.ApiKey != "" {
+				expectedApiKey := tc.options.ApiKey
+				actualApiKey := client.headers.Get("X-Schematic-Api-Key")
+				if actualApiKey != expectedApiKey {
+					t.Errorf("Expected API key %q in headers, got %q", expectedApiKey, actualApiKey)
+				}
 			}
 		})
 	}

@@ -1,15 +1,14 @@
-# Schematic DataStream WebSocket Client
+# Schematic Datastream Client
 
-A generic WebSocket client library with automatic reconnection capabilities, designed for use with the Schematic DataStream API or any WebSocket-based service.
+A high-level Go client for connecting to Schematic's real-time datastream. Abstracts away WebSocket complexity and provides a simple, clean API for receiving live updates about companies, users, and feature flags.
 
 ## Features
 
-- **Automatic Reconnection**: Exponential backoff with jitter to handle connection failures
+- **Automatic Connection Management**: Handles WebSocket upgrades, reconnections, and connection lifecycle
+- **Real-time Data Updates**: Receive live updates for companies, users, and feature flags
+- **Production Ready**: Exponential backoff, jitter, comprehensive error handling
 - **Thread-Safe**: Safe for concurrent use across multiple goroutines
-- **Configurable**: Customizable connection parameters, timeouts, and retry logic
-- **Interface-Based**: Flexible message handling and connection readiness callbacks
-- **Logging Support**: Optional logging interface for debugging and monitoring
-- **Error Handling**: Comprehensive error reporting through channels
+- **Flexible Integration**: Function-based handlers, optional logging and initialization callbacks
 
 ## Installation
 
@@ -59,14 +58,10 @@ func (l *SimpleLogger) Warn(ctx context.Context, msg string)  { log.Printf("WARN
 func (l *SimpleLogger) Error(ctx context.Context, msg string) { log.Printf("ERROR: %s", msg) }
 
 func main() {
-    // Create headers if needed
-    headers := http.Header{}
-    headers.Set("Authorization", "Bearer your-token-here")
-
-    // Configure the client
+    // Configure the datastream client
     options := schematicdatastreamws.ClientOptions{
-        URL:                    "wss://api.schematichq.com/datastream",
-        Headers:                headers,
+        URL:                    "https://api.schematichq.com", // HTTP URLs are automatically converted to WebSocket
+        ApiKey:                 "your-schematic-api-key-here",
         MessageHandler:         &MyMessageHandler{},
         ConnectionReadyHandler: &MyConnectionReadyHandler{},
         Logger:                 &SimpleLogger{},
@@ -174,10 +169,10 @@ func (h *InitializationHandler) OnConnectionReady(ctx context.Context) error {
 
 ### ClientOptions
 
-- **URL** (required): WebSocket endpoint URL
-- **Headers**: HTTP headers to include in the connection request
-- **MessageHandler** (required): Interface for handling incoming messages
-- **ConnectionReadyHandler** (optional): Interface for initialization logic
+- **URL** (required): API endpoint URL (HTTP URLs are automatically converted to WebSocket datastream URLs)
+- **ApiKey** (required): Schematic API key for authentication
+- **MessageHandler** (required): Function for handling incoming datastream messages
+- **ConnectionReadyHandler** (optional): Function for initialization logic after connection
 - **Logger** (optional): Interface for logging events
 - **MaxReconnectAttempts**: Maximum number of reconnection attempts (default: 10)
 - **MinReconnectDelay**: Minimum delay between reconnection attempts (default: 1s)

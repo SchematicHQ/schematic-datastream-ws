@@ -27,7 +27,7 @@ const (
 	maxReconnectDelay    = 30 * time.Second
 )
 
-// Logger interface for logging WebSocket events
+// Logger interface for logging datastream events
 type Logger interface {
 	Debug(context.Context, string, ...any)
 	Info(context.Context, string, ...any)
@@ -35,17 +35,17 @@ type Logger interface {
 	Error(context.Context, string, ...any)
 }
 
-// MessageHandlerFunc is a function type for handling incoming WebSocket messages
-// Now expects parsed DataStreamResp instead of raw bytes
+// MessageHandlerFunc is a function type for handling incoming datastream messages
+// Expects parsed DataStreamResp messages
 type MessageHandlerFunc func(ctx context.Context, message *DataStreamResp) error
 
 // ConnectionReadyHandlerFunc is a function type for functions that need to be called before connection is considered ready
 type ConnectionReadyHandlerFunc func(ctx context.Context) error
 
-// ClientOptions contains configuration for the WebSocket client
+// ClientOptions contains configuration for the datastream client
 type ClientOptions struct {
 	URL                    string // HTTP API URL or WebSocket URL - HTTP URLs will be automatically converted to WebSocket URLs
-	Headers                http.Header
+	ApiKey                 string // Schematic API key for authentication
 	MessageHandler         MessageHandlerFunc
 	ConnectionReadyHandler ConnectionReadyHandlerFunc
 	Logger                 Logger
@@ -54,7 +54,7 @@ type ClientOptions struct {
 	MaxReconnectDelay      time.Duration
 }
 
-// Client represents a generic WebSocket client with reconnection capabilities
+// Client represents a Schematic datastream websocket client with automatic reconnection
 type Client struct {
 	// Configuration
 	url                    *url.URL
@@ -68,7 +68,7 @@ type Client struct {
 
 	// Connection state
 	conn        *websocket.Conn
-	connected   bool // WebSocket connection state
+	connected   bool // Connection state
 	ready       bool // Datastream client ready state
 	connectedMu sync.RWMutex
 	readyMu     sync.RWMutex
@@ -122,10 +122,14 @@ func convertAPIURLToWebSocketURL(apiURL string) (*url.URL, error) {
 	return parsedURL, nil
 }
 
-// NewClient creates a new WebSocket client with the given options
+// NewClient creates a new datastream websocket client with the given options
 func NewClient(options ClientOptions) (*Client, error) {
 	if options.URL == "" {
 		return nil, fmt.Errorf("URL is required")
+	}
+
+	if options.ApiKey == "" {
+		return nil, fmt.Errorf("ApiKey is required")
 	}
 
 	if options.MessageHandler == nil {
@@ -149,6 +153,10 @@ func NewClient(options ClientOptions) (*Client, error) {
 		}
 	}
 
+	// Create headers with API key
+	headers := http.Header{}
+	headers.Set("X-Schematic-Api-Key", options.ApiKey)
+
 	// Set defaults
 	if options.MaxReconnectAttempts == 0 {
 		options.MaxReconnectAttempts = maxReconnectAttempts
@@ -164,7 +172,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 
 	return &Client{
 		url:                    parsedURL,
-		headers:                options.Headers,
+		headers:                headers,
 		logger:                 options.Logger,
 		messageHandler:         options.MessageHandler,
 		connectionReadyHandler: options.ConnectionReadyHandler,
@@ -199,7 +207,6 @@ func (c *Client) IsReady() bool {
 }
 
 // SendMessage sends a message through the WebSocket connection
-// Now checks WebSocket connection state, not ready state
 func (c *Client) SendMessage(message interface{}) error {
 	if !c.IsConnected() || c.conn == nil {
 		return fmt.Errorf("WebSocket connection is not available!")
@@ -272,7 +279,7 @@ func (c *Client) connectAndRead() {
 			}
 
 			delay := c.calculateBackoffDelay(attempts)
-			c.log("info", fmt.Sprintf("Retrying connection in %v (attempt %d/%d)", delay, attempts, c.maxReconnectAttempts))
+			c.log("info", fmt.Sprintf("Retrying WebSocket connection in %v (attempt %d/%d)", delay, attempts, c.maxReconnectAttempts))
 
 			select {
 			case <-time.After(delay):
@@ -425,7 +432,7 @@ func (c *Client) readMessages() {
 
 // handleReadError processes errors from reading WebSocket messages
 func (c *Client) handleReadError(err error) {
-	c.log("debug", fmt.Sprintf("handleReadError: processing read error: %v", err))
+	c.log("debug", fmt.Sprintf("handleReadError: processing WebSocket read error: %v", err))
 
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
