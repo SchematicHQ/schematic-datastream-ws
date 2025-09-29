@@ -15,6 +15,7 @@ type EntityType string
 const (
 	EntityTypeCompany   EntityType = "rulesengine.Company"
 	EntityTypeCompanies EntityType = "rulesengine.Companies"
+	EntityTypeFlag      EntityType = "rulesengine.Flag"
 	EntityTypeFlags     EntityType = "rulesengine.Flags"
 	EntityTypeUser      EntityType = "rulesengine.User"
 	EntityTypeUsers     EntityType = "rulesengine.Users"
