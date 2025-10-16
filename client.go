@@ -298,10 +298,12 @@ func (c *Client) connectAndRead() {
 		c.log("debug", "Setting up WebSocket pong handler")
 		c.conn.SetPongHandler(c.handlePong)
 
-		// Set initial read deadline
-		c.log("debug", fmt.Sprintf("Setting initial read deadline to %v", time.Now().Add(pongWait)))
-		if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-			c.log("error", fmt.Sprintf("Failed to set read deadline: %v", err))
+		// Set a temporary read deadline during initialization to prevent hangs
+		// This will be updated to the normal ping/pong deadline after connection ready handler completes
+		initTimeout := 10 * time.Minute // Allow up to 10 minutes for initialization
+		c.log("debug", fmt.Sprintf("Setting temporary read deadline for initialization: %v", time.Now().Add(initTimeout)))
+		if err := c.conn.SetReadDeadline(time.Now().Add(initTimeout)); err != nil {
+			c.log("error", fmt.Sprintf("Failed to set temporary read deadline: %v", err))
 		}
 
 		// Start message reading first so connection is ready to receive responses
@@ -318,6 +320,13 @@ func (c *Client) connectAndRead() {
 				continue
 			}
 			c.log("debug", "Connection ready handler completed successfully")
+		}
+
+		// Set normal read deadline for ping/pong operations
+		// This replaces the temporary initialization deadline
+		c.log("debug", fmt.Sprintf("Setting normal read deadline for ping/pong: %v", time.Now().Add(pongWait)))
+		if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+			c.log("error", fmt.Sprintf("Failed to set normal read deadline: %v", err))
 		}
 
 		// Mark as ready only after successful initialization
