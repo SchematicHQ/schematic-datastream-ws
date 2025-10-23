@@ -316,6 +316,7 @@ func (c *Client) connectAndRead() {
 			if err := c.connectionReadyHandler(c.ctx); err != nil {
 				c.log("error", fmt.Sprintf("Connection ready handler failed: %v", err))
 				c.setConnected(false)
+				c.setReady(false)
 				c.conn.Close()
 				continue
 			}
@@ -350,6 +351,8 @@ func (c *Client) connect() (*websocket.Conn, error) {
 	c.log("debug", fmt.Sprintf("connect: attempting to dial WebSocket URL: %s", c.url.String()))
 
 	dialer := websocket.DefaultDialer
+	dialer.HandshakeTimeout = 30 * time.Second // Set connection timeout
+
 	conn, resp, err := dialer.Dial(c.url.String(), c.headers)
 
 	if err != nil {
@@ -425,8 +428,12 @@ func (c *Client) readMessages() {
 			continue
 		}
 
+		var entityID string
+		if message.EntityID != nil {
+			entityID = *message.EntityID
+		}
 		c.log("debug", fmt.Sprintf("readMessages: parsed message - EntityType: %s, MessageType: %s, EntityID: %v, DataLength: %d",
-			message.EntityType, message.MessageType, message.EntityID, len(message.Data)))
+			message.EntityType, message.MessageType, entityID, len(message.Data)))
 
 		// Handle the parsed message using the provided handler
 		c.log("debug", "readMessages: calling message handler...")
@@ -443,22 +450,30 @@ func (c *Client) readMessages() {
 func (c *Client) handleReadError(err error) {
 	c.log("debug", fmt.Sprintf("handleReadError: processing WebSocket read error: %v", err))
 
+	// Set disconnected state for all error types
+	c.setConnected(false)
+
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
 		c.log("debug", fmt.Sprintf("handleReadError: network operation error detected: %v", opErr))
-		c.setConnected(false)
+		c.log("debug", "handleReadError: triggering reconnect for network error")
+		select {
+		case c.reconnect <- true:
+			c.log("debug", "handleReadError: reconnect signal sent for network error")
+		default:
+			c.log("debug", "handleReadError: reconnect channel full, skipping signal")
+		}
 		return
 	}
 
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		c.log("debug", fmt.Sprintf("handleReadError: normal WebSocket close detected: %v", err))
-		c.setConnected(false)
+		// Don't trigger reconnect for normal closure
 		return
 	}
 
 	if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 		c.log("debug", fmt.Sprintf("handleReadError: unexpected WebSocket close error: %v", err))
-		c.setConnected(false)
 		c.log("debug", "handleReadError: triggering reconnect attempt")
 		select {
 		case c.reconnect <- true:
@@ -469,10 +484,13 @@ func (c *Client) handleReadError(err error) {
 		return
 	}
 
-	c.setConnected(false)
+	// For any other error types, trigger reconnection
+	c.log("debug", fmt.Sprintf("handleReadError: unhandled error type, triggering reconnect: %v", err))
 	select {
 	case c.reconnect <- true:
+		c.log("debug", "handleReadError: reconnect signal sent for unhandled error")
 	default:
+		c.log("debug", "handleReadError: reconnect channel full, skipping signal")
 	}
 }
 
