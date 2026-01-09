@@ -18,10 +18,10 @@ import (
 )
 
 const (
-	// WebSocket configuration constants
+	// WebSocket configuration constants - defaults
 	writeWait            = 10 * time.Second
-	pongWait             = 60 * time.Second
-	pingPeriod           = (pongWait * 9) / 10
+	defaultPongWait      = 40 * time.Second // Default: 40s to handle load balancer timeouts
+	defaultPingPeriod    = 30 * time.Second // Default: send ping every 30s (well under typical 60s LB timeout)
 	maxReconnectAttempts = 10
 	minReconnectDelay    = 1 * time.Second
 	maxReconnectDelay    = 30 * time.Second
@@ -52,6 +52,8 @@ type ClientOptions struct {
 	MaxReconnectAttempts   int
 	MinReconnectDelay      time.Duration
 	MaxReconnectDelay      time.Duration
+	PingPeriod             time.Duration // How often to send pings (default: 30s)
+	PongWait               time.Duration // How long to wait for pong response (default: 40s)
 }
 
 // Client represents a Schematic datastream websocket client with automatic reconnection
@@ -65,6 +67,8 @@ type Client struct {
 	maxReconnectAttempts   int
 	minReconnectDelay      time.Duration
 	maxReconnectDelay      time.Duration
+	pingPeriod             time.Duration
+	pongWait               time.Duration
 
 	// Connection state
 	conn        *websocket.Conn
@@ -167,6 +171,12 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if options.MaxReconnectDelay == 0 {
 		options.MaxReconnectDelay = maxReconnectDelay
 	}
+	if options.PingPeriod == 0 {
+		options.PingPeriod = defaultPingPeriod
+	}
+	if options.PongWait == 0 {
+		options.PongWait = defaultPongWait
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -179,6 +189,8 @@ func NewClient(options ClientOptions) (*Client, error) {
 		maxReconnectAttempts:   options.MaxReconnectAttempts,
 		minReconnectDelay:      options.MinReconnectDelay,
 		maxReconnectDelay:      options.MaxReconnectDelay,
+		pingPeriod:             options.PingPeriod,
+		pongWait:               options.PongWait,
 		done:                   make(chan bool, 1),
 		reconnect:              make(chan bool, 1),
 		errors:                 make(chan error, 100),
@@ -325,8 +337,8 @@ func (c *Client) connectAndRead() {
 
 		// Set normal read deadline for ping/pong operations
 		// This replaces the temporary initialization deadline
-		c.log("debug", fmt.Sprintf("Setting normal read deadline for ping/pong: %v", time.Now().Add(pongWait)))
-		if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+		c.log("debug", fmt.Sprintf("Setting normal read deadline for ping/pong: %v", time.Now().Add(c.pongWait)))
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.pongWait)); err != nil {
 			c.log("error", fmt.Sprintf("Failed to set normal read deadline: %v", err))
 		}
 
@@ -373,7 +385,7 @@ func (c *Client) connect() (*websocket.Conn, error) {
 
 // handleConnection manages the connection lifecycle with ping/pong and reconnection logic
 func (c *Client) handleConnection() bool {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -508,7 +520,7 @@ func (c *Client) sendPing() error {
 
 // handlePong handles pong responses from the server
 func (c *Client) handlePong(string) error {
-	return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	return c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
 }
 
 // calculateBackoffDelay calculates exponential backoff delay with jitter
