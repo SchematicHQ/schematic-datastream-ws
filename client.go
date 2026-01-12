@@ -476,44 +476,22 @@ func (c *Client) handleReadError(err error) {
 		return
 	}
 
+	// Skip reconnection for normal/graceful closure
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		c.log("debug", fmt.Sprintf("handleReadError: normal WebSocket close detected: %v", err))
-		// Don't trigger reconnect for normal closure
 		return
 	}
 
-	// Check for abnormal closure (1006) - this happens when connection is terminated without close frame
-	// Common causes: load balancer timeout, network interruption
+	// For any other error (including abnormal closure 1006), trigger reconnection
 	if websocket.IsCloseError(err, websocket.CloseAbnormalClosure) {
-		c.log("info", fmt.Sprintf("handleReadError: abnormal closure detected (likely timeout): %v", err))
-		c.log("info", "handleReadError: triggering reconnect for abnormal closure")
-		select {
-		case c.reconnect <- true:
-			c.log("debug", "handleReadError: reconnect signal sent for abnormal closure")
-		default:
-			c.log("debug", "handleReadError: reconnect channel full, skipping signal")
-		}
-		return
+		c.log("info", fmt.Sprintf("WebSocket connection lost (abnormal closure, likely timeout): %v", err))
+	} else {
+		c.log("debug", fmt.Sprintf("handleReadError: triggering reconnect for error: %v", err))
 	}
 
-	// Check for other unexpected close errors
-	if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
-		c.log("debug", fmt.Sprintf("handleReadError: unexpected WebSocket close error: %v", err))
-		c.log("debug", "handleReadError: triggering reconnect attempt")
-		select {
-		case c.reconnect <- true:
-			c.log("debug", "handleReadError: reconnect signal sent")
-		default:
-			c.log("debug", "handleReadError: reconnect channel full, skipping signal")
-		}
-		return
-	}
-
-	// For any other error types, trigger reconnection
-	c.log("debug", fmt.Sprintf("handleReadError: unhandled error type, triggering reconnect: %v", err))
 	select {
 	case c.reconnect <- true:
-		c.log("debug", "handleReadError: reconnect signal sent for unhandled error")
+		c.log("debug", "handleReadError: reconnect signal sent")
 	default:
 		c.log("debug", "handleReadError: reconnect channel full, skipping signal")
 	}
