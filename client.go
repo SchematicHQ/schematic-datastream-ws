@@ -310,17 +310,18 @@ func (c *Client) connectAndRead() {
 		c.log("debug", "Setting up WebSocket pong handler")
 		c.conn.SetPongHandler(c.handlePong)
 
-		// Set a temporary read deadline during initialization to prevent hangs
-		// This will be updated to the normal ping/pong deadline after connection ready handler completes
-		initTimeout := 10 * time.Minute // Allow up to 10 minutes for initialization
-		c.log("debug", fmt.Sprintf("Setting temporary read deadline for initialization: %v", time.Now().Add(initTimeout)))
-		if err := c.conn.SetReadDeadline(time.Now().Add(initTimeout)); err != nil {
-			c.log("error", fmt.Sprintf("Failed to set temporary read deadline: %v", err))
+		// Set initial read deadline for ping/pong operations
+		c.log("debug", fmt.Sprintf("Setting read deadline for ping/pong: %v", time.Now().Add(c.pongWait)))
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.pongWait)); err != nil {
+			c.log("error", fmt.Sprintf("Failed to set read deadline: %v", err))
 		}
 
 		// Start message reading first so connection is ready to receive responses
 		c.log("debug", "Starting message reading goroutine")
 		go c.readMessages()
+
+		// Start ping ticker immediately to keep connection alive during initialization
+		stopInitPing := c.startInitPingTicker()
 
 		// Call connection ready handler if provided
 		if c.connectionReadyHandler != nil {
@@ -329,18 +330,15 @@ func (c *Client) connectAndRead() {
 				c.log("error", fmt.Sprintf("Connection ready handler failed: %v", err))
 				c.setConnected(false)
 				c.setReady(false)
+				stopInitPing() // Stop the temporary ping ticker
 				c.conn.Close()
 				continue
 			}
 			c.log("debug", "Connection ready handler completed successfully")
 		}
 
-		// Set normal read deadline for ping/pong operations
-		// This replaces the temporary initialization deadline
-		c.log("debug", fmt.Sprintf("Setting normal read deadline for ping/pong: %v", time.Now().Add(c.pongWait)))
-		if err := c.conn.SetReadDeadline(time.Now().Add(c.pongWait)); err != nil {
-			c.log("error", fmt.Sprintf("Failed to set normal read deadline: %v", err))
-		}
+		// Stop the temporary ping ticker - handleConnection will take over
+		stopInitPing()
 
 		// Mark as ready only after successful initialization
 		c.setReady(true)
@@ -478,31 +476,51 @@ func (c *Client) handleReadError(err error) {
 		return
 	}
 
+	// Skip reconnection for normal/graceful closure
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		c.log("debug", fmt.Sprintf("handleReadError: normal WebSocket close detected: %v", err))
-		// Don't trigger reconnect for normal closure
 		return
 	}
 
-	if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-		c.log("debug", fmt.Sprintf("handleReadError: unexpected WebSocket close error: %v", err))
-		c.log("debug", "handleReadError: triggering reconnect attempt")
-		select {
-		case c.reconnect <- true:
-			c.log("debug", "handleReadError: reconnect signal sent")
-		default:
-			c.log("debug", "handleReadError: reconnect channel full, skipping signal")
-		}
-		return
+	// For any other error (including abnormal closure 1006), trigger reconnection
+	if websocket.IsCloseError(err, websocket.CloseAbnormalClosure) {
+		c.log("info", fmt.Sprintf("WebSocket connection lost (abnormal closure, likely timeout): %v", err))
+	} else {
+		c.log("debug", fmt.Sprintf("handleReadError: triggering reconnect for error: %v", err))
 	}
 
-	// For any other error types, trigger reconnection
-	c.log("debug", fmt.Sprintf("handleReadError: unhandled error type, triggering reconnect: %v", err))
 	select {
 	case c.reconnect <- true:
-		c.log("debug", "handleReadError: reconnect signal sent for unhandled error")
+		c.log("debug", "handleReadError: reconnect signal sent")
 	default:
 		c.log("debug", "handleReadError: reconnect channel full, skipping signal")
+	}
+}
+
+// startInitPingTicker starts a temporary ping ticker during initialization
+// Returns a stop function that should be called when initialization completes
+func (c *Client) startInitPingTicker() func() {
+	c.log("debug", "Starting ping ticker to maintain connection during initialization")
+	pingTicker := time.NewTicker(c.pingPeriod)
+	pingDone := make(chan bool)
+
+	go func() {
+		for {
+			select {
+			case <-pingDone:
+				pingTicker.Stop()
+				return
+			case <-pingTicker.C:
+				if err := c.sendPing(); err != nil {
+					c.log("error", fmt.Sprintf("Failed to send ping during init: %v", err))
+				}
+			}
+		}
+	}()
+
+	// Return stop function
+	return func() {
+		close(pingDone)
 	}
 }
 
