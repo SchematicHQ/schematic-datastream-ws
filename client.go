@@ -446,13 +446,17 @@ func (c *Client) readMessages() {
 			message.EntityType, message.MessageType, entityID, len(message.Data)))
 
 		// Handle the parsed message using the provided handler
-		c.log("debug", "readMessages: calling message handler...")
-		if err := c.messageHandler(c.ctx, &message); err != nil {
-			c.log("error", fmt.Sprintf("readMessages: message handler error: %v", err))
-			c.errors <- fmt.Errorf("message handler error: %w", err)
-		} else {
-			c.log("debug", "readMessages: message handler completed successfully")
-		}
+		// Process message handler asynchronously to avoid blocking the read loop
+		// This ensures pongs can still be received even if message processing is slow
+		c.log("debug", "readMessages: calling message handler (async)...")
+		go func(msg *DataStreamResp) {
+			if err := c.messageHandler(c.ctx, msg); err != nil {
+				c.log("error", fmt.Sprintf("readMessages: message handler error: %v", err))
+				c.errors <- fmt.Errorf("message handler error: %w", err)
+			} else {
+				c.log("debug", "readMessages: message handler completed successfully")
+			}
+		}(&message)
 	}
 }
 
