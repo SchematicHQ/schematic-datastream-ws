@@ -184,7 +184,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		options.PongWait = defaultPongWait
 	}
 	if options.MessageWorkers == 0 {
-		options.MessageWorkers = 10 // Default to 10 concurrent workers
+		options.MessageWorkers = 1 // Default to 1 worker to ensure message processing order
 	}
 	if options.MessageQueueSize == 0 {
 		options.MessageQueueSize = 100 // Default queue size of 100 messages
