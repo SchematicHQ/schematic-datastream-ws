@@ -54,6 +54,8 @@ type ClientOptions struct {
 	MaxReconnectDelay      time.Duration
 	PingPeriod             time.Duration // How often to send pings (default: 30s)
 	PongWait               time.Duration // How long to wait for pong response (default: 40s)
+	MessageWorkers         int           // Number of concurrent message handler workers (default: 10)
+	MessageQueueSize       int           // Size of message queue buffer (default: 100)
 }
 
 // Client represents a Schematic datastream websocket client with automatic reconnection
@@ -82,6 +84,10 @@ type Client struct {
 	done      chan bool
 	reconnect chan bool
 	errors    chan error
+
+	// Message processing worker pool
+	messageQueue chan *DataStreamResp
+	workersWg    sync.WaitGroup
 
 	// Context cancellation
 	ctx    context.Context
@@ -177,10 +183,16 @@ func NewClient(options ClientOptions) (*Client, error) {
 	if options.PongWait == 0 {
 		options.PongWait = defaultPongWait
 	}
+	if options.MessageWorkers == 0 {
+		options.MessageWorkers = 10 // Default to 10 concurrent workers
+	}
+	if options.MessageQueueSize == 0 {
+		options.MessageQueueSize = 100 // Default queue size of 100 messages
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Client{
+	client := &Client{
 		url:                    parsedURL,
 		headers:                headers,
 		logger:                 options.Logger,
@@ -194,9 +206,18 @@ func NewClient(options ClientOptions) (*Client, error) {
 		done:                   make(chan bool, 1),
 		reconnect:              make(chan bool, 1),
 		errors:                 make(chan error, 100),
+		messageQueue:           make(chan *DataStreamResp, options.MessageQueueSize),
 		ctx:                    ctx,
 		cancel:                 cancel,
-	}, nil
+	}
+
+	// Start message processing workers
+	for i := 0; i < options.MessageWorkers; i++ {
+		client.workersWg.Add(1)
+		go client.messageWorker()
+	}
+
+	return client, nil
 }
 
 // Start begins the WebSocket connection and message handling
@@ -247,6 +268,13 @@ func (c *Client) Close() {
 	default:
 	}
 
+	// Close message queue to signal workers to stop
+	close(c.messageQueue)
+
+	// Wait for all message workers to complete
+	c.log("info", "Waiting for message workers to complete")
+	c.workersWg.Wait()
+
 	// Close connection and reset states
 	c.setReady(false)
 	c.setConnected(false)
@@ -260,6 +288,48 @@ func (c *Client) Close() {
 // GetErrorChannel returns a channel for receiving connection errors
 func (c *Client) GetErrorChannel() <-chan error {
 	return c.errors
+}
+
+// messageWorker processes messages from the queue with panic recovery
+func (c *Client) messageWorker() {
+	defer c.workersWg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			c.log("error", fmt.Sprintf("panic in message worker: %v", r))
+			// Try to send error, but don't block if channel is full
+			select {
+			case c.errors <- fmt.Errorf("panic in message worker: %v", r):
+			default:
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			c.log("debug", "messageWorker: context cancelled, exiting")
+			return
+		case msg, ok := <-c.messageQueue:
+			if !ok {
+				// Channel closed, graceful shutdown
+				c.log("debug", "messageWorker: queue closed, exiting")
+				return
+			}
+
+			// Process the message with timeout context awareness
+			if err := c.messageHandler(c.ctx, msg); err != nil {
+				c.log("error", fmt.Sprintf("messageWorker: handler error: %v", err))
+				// Try to send error, but don't block
+				select {
+				case c.errors <- fmt.Errorf("message handler error: %w", err):
+				default:
+					c.log("warn", "messageWorker: error channel full, dropping error")
+				}
+			} else {
+				c.log("debug", "messageWorker: message processed successfully")
+			}
+		}
+	}
 }
 
 // connectAndRead handles the main connection lifecycle
@@ -445,13 +515,17 @@ func (c *Client) readMessages() {
 		c.log("debug", fmt.Sprintf("readMessages: parsed message - EntityType: %s, MessageType: %s, EntityID: %v, DataLength: %d",
 			message.EntityType, message.MessageType, entityID, len(message.Data)))
 
-		// Handle the parsed message using the provided handler
-		c.log("debug", "readMessages: calling message handler...")
-		if err := c.messageHandler(c.ctx, &message); err != nil {
-			c.log("error", fmt.Sprintf("readMessages: message handler error: %v", err))
-			c.errors <- fmt.Errorf("message handler error: %w", err)
-		} else {
-			c.log("debug", "readMessages: message handler completed successfully")
+		// Queue message for worker pool processing
+		// Use non-blocking send with context awareness
+		select {
+		case c.messageQueue <- &message:
+			c.log("debug", "readMessages: message queued for processing")
+		case <-c.ctx.Done():
+			c.log("debug", "readMessages: context cancelled while queuing message")
+			return
+		default:
+			c.log("error", "readMessages: message queue full, dropping message")
+			c.errors <- fmt.Errorf("message queue full, message dropped")
 		}
 	}
 }
