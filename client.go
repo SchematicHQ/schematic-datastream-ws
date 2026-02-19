@@ -550,9 +550,28 @@ func (c *Client) handleReadError(err error) {
 		return
 	}
 
-	// Skip reconnection for normal/graceful closure
+	// Skip reconnection for normal/graceful closure and signal done
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-		c.log("debug", fmt.Sprintf("handleReadError: normal WebSocket close detected: %v", err))
+		c.log("info", fmt.Sprintf("handleReadError: normal WebSocket close detected: %v", err))
+		select {
+		case c.done <- true:
+			c.log("debug", "handleReadError: done signal sent for normal closure")
+		default:
+			c.log("debug", "handleReadError: done channel full, skipping signal")
+		}
+		return
+	}
+
+	// Skip reconnection for application-level non-retriable errors (e.g. 4001 unauthorized)
+	if websocket.IsCloseError(err, 4001) {
+		c.log("error", fmt.Sprintf("handleReadError: non-retriable close error: %v", err))
+		c.errors <- fmt.Errorf("non-retriable WebSocket close: %w", err)
+		select {
+		case c.done <- true:
+			c.log("debug", "handleReadError: done signal sent for non-retriable error")
+		default:
+			c.log("debug", "handleReadError: done channel full, skipping signal")
+		}
 		return
 	}
 
