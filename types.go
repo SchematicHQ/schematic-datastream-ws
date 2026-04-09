@@ -31,6 +31,14 @@ const (
 	MessageTypeUnknown MessageType = "unknown"
 )
 
+// PartialType identifies the kind of update carried in a partial company message.
+type PartialType string
+
+const (
+	PartialTypeCreditBalances PartialType = "rulesengine.CreditBalances"
+	PartialTypeCompanyMetric  PartialType = "rulesengine.CompanyMetric"
+)
+
 // DataStreamReq represents a request message to the datastream
 type DataStreamReq struct {
 	Action     Action            `json:"action"`
@@ -49,6 +57,7 @@ type DataStreamResp struct {
 	EntityID    *string         `json:"entity_id"`
 	EntityType  string          `json:"entity_type"`
 	MessageType MessageType     `json:"message_type"`
+	PartialType *PartialType    `json:"partial_type,omitempty"`
 }
 
 // DataStreamError represents an error message from the datastream
