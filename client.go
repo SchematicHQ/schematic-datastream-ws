@@ -56,6 +56,7 @@ type ClientOptions struct {
 	PongWait               time.Duration // How long to wait for pong response (default: 40s)
 	MessageWorkers         int           // Number of concurrent message handler workers (default: 10)
 	MessageQueueSize       int           // Size of message queue buffer (default: 100)
+	ExtraHeaders           http.Header   // Additional headers to include in the WebSocket handshake
 }
 
 // Client represents a Schematic datastream websocket client with automatic reconnection
@@ -166,6 +167,13 @@ func NewClient(options ClientOptions) (*Client, error) {
 	// Create headers with API key
 	headers := http.Header{}
 	headers.Set("X-Schematic-Api-Key", options.ApiKey)
+
+	// Merge extra headers
+	for key, values := range options.ExtraHeaders {
+		for _, v := range values {
+			headers.Set(key, v)
+		}
+	}
 
 	// Set defaults
 	if options.MaxReconnectAttempts == 0 {
