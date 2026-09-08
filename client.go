@@ -434,12 +434,27 @@ func (c *Client) connectAndRead() {
 	}
 }
 
+// newDialer builds the dialer used for every connection attempt. It must not
+// alias websocket.DefaultDialer: that is a package-level pointer, so mutating
+// it would change dialing behavior for every other gorilla/websocket user in
+// the process.
+//
+// EnableCompression offers permessage-deflate (RFC 7692) in the handshake. The
+// extension is client-offered, so without it the server never compresses, and
+// the flags payload is repetitive JSON that compresses well.
+func newDialer() *websocket.Dialer {
+	return &websocket.Dialer{
+		Proxy:             http.ProxyFromEnvironment,
+		HandshakeTimeout:  30 * time.Second,
+		EnableCompression: true,
+	}
+}
+
 // connect establishes the WebSocket connection
 func (c *Client) connect() (*websocket.Conn, error) {
 	c.log("debug", fmt.Sprintf("connect: attempting to dial WebSocket URL: %s", c.url.String()))
 
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 30 * time.Second // Set connection timeout
+	dialer := newDialer()
 
 	conn, resp, err := dialer.Dial(c.url.String(), c.headers)
 

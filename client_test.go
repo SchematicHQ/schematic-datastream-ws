@@ -3,6 +3,9 @@ package schematicdatastreamws
 import (
 	"context"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,5 +169,52 @@ func TestHandleReadError_OtherCloseError(t *testing.T) {
 		t.Error("unexpected done signal for other close error")
 	default:
 		// expected
+	}
+}
+
+func TestNewDialer(t *testing.T) {
+	globalTimeout := websocket.DefaultDialer.HandshakeTimeout
+
+	d := newDialer()
+
+	if d == websocket.DefaultDialer {
+		t.Fatal("newDialer returned the package-level websocket.DefaultDialer")
+	}
+	if !d.EnableCompression {
+		t.Error("expected EnableCompression to be true")
+	}
+	if d.HandshakeTimeout != 30*time.Second {
+		t.Errorf("expected HandshakeTimeout of 30s, got %v", d.HandshakeTimeout)
+	}
+	if d.Proxy == nil {
+		t.Error("expected Proxy to be set so HTTP(S)_PROXY is still honored")
+	}
+	if websocket.DefaultDialer.HandshakeTimeout != globalTimeout {
+		t.Errorf("newDialer mutated websocket.DefaultDialer.HandshakeTimeout: %v -> %v",
+			globalTimeout, websocket.DefaultDialer.HandshakeTimeout)
+	}
+}
+
+func TestNewDialerNegotiatesPermessageDeflate(t *testing.T) {
+	upgrader := websocket.Upgrader{EnableCompression: true}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade failed: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	conn, resp, err := newDialer().Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	if ext := resp.Header.Get("Sec-WebSocket-Extensions"); !strings.Contains(ext, "permessage-deflate") {
+		t.Errorf("expected server to negotiate permessage-deflate, got %q", ext)
 	}
 }
