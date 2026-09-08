@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -208,7 +209,13 @@ func TestNewDialerNegotiatesPermessageDeflate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	conn, resp, err := newDialer().Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL %q: %v", srv.URL, err)
+	}
+	u.Scheme = "ws"
+
+	conn, resp, err := newDialer().Dial(u.String(), nil)
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
 	}
